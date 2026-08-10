@@ -732,33 +732,53 @@ function love.draw()
         love.graphics.printf("No .psxmod packages installed.\nInstall into  " .. core.MODS_PKG_DIR .. "\\<id>\\<version>\\manifest.toml",
             colX + 20, y + 30, colW - 40, "center")
     else
+        -- inner width available for a wrapped feature description (leaves a
+        -- gutter on the right for the toggle so text never runs under it).
+        local descW = colW - 52 - 96
+        local lineH = FONT_TINY:getHeight() + 2
+        local nameH = FONT_SMALL:getHeight()
         for _, pkg in ipairs(ModsList) do
-            local ph = 46 + #pkg.features * 56
+            -- pre-measure each feature row from its wrapped description so the
+            -- panel grows to fit long text instead of clipping/overlapping.
+            local rows, featTotal = {}, 0
+            for _, f in ipairs(pkg.features) do
+                local _, wrapped = FONT_TINY:getWrap(f.description or "", descW)
+                local n = math.max(1, #wrapped)
+                local rh = 10 + nameH + 5 + n * lineH + 10
+                rows[#rows + 1] = { f = f, h = rh }
+                featTotal = featTotal + rh + 8
+            end
+            local headerH = 44
+            local ph = headerH + featTotal + 4
             Theme.panel(colX, y, colW, ph)
+            -- package header: name + version + author
             love.graphics.setFont(FONT_BODY)
             love.graphics.setColor(C.gold)
-            love.graphics.print(pkg.name, colX + 16, y + 12)
+            love.graphics.print(pkg.name, colX + 16, y + 13)
             local nameW = FONT_BODY:getWidth(pkg.name)
             love.graphics.setFont(FONT_TINY)
             love.graphics.setColor(C.textMuted)
             local meta = "v" .. tostring(pkg.version)
-            if pkg.author ~= "" then meta = meta .. "  ·  by " .. pkg.author end
-            love.graphics.print(meta, colX + 16 + nameW + 12, y + 16)
-            local fy = y + 42
-            for _, f in ipairs(pkg.features) do
-                Theme.fillRect(colX + 12, fy, colW - 24, 48, 6, C.obsidian, f.enabled and 0.55 or 0.35)
+            if pkg.author ~= "" then meta = meta .. "   ·   " .. pkg.author end
+            love.graphics.print(meta, colX + 16 + nameW + 14, y + 17)
+            -- feature rows
+            local fy = y + headerH
+            for _, row in ipairs(rows) do
+                local f = row.f
+                Theme.fillRect(colX + 12, fy, colW - 24, row.h, 6, C.obsidian, f.enabled and 0.55 or 0.30)
                 if f.enabled then
-                    Theme.strokeRect(colX + 12, fy, colW - 24, 48, 6, Theme.rgba(C.success, 0.4), 1, 1)
+                    Theme.strokeRect(colX + 12, fy, colW - 24, row.h, 6, Theme.rgba(C.success, 0.45), 1, 1)
                 end
                 love.graphics.setFont(FONT_SMALL)
                 love.graphics.setColor(f.enabled and C.text or C.textMuted)
-                love.graphics.print(f.name, colX + 26, fy + 8)
+                love.graphics.print(f.name, colX + 26, fy + 10)
                 love.graphics.setFont(FONT_TINY)
                 love.graphics.setColor(C.textMuted)
-                love.graphics.printf(f.description, colX + 26, fy + 27, colW - 150, "left")
+                love.graphics.printf(f.description or "", colX + 26, fy + 10 + nameH + 5, descW, "left")
                 local pid, fid, en = pkg.id, f.id, f.enabled
-                toggleSwitch(colX + colW - 74, fy + 12, en, function() onToggleModFeature(pid, fid, not en) end)
-                fy = fy + 56
+                toggleSwitch(colX + colW - 74, fy + (row.h - 24) / 2, en,
+                    function() onToggleModFeature(pid, fid, not en) end)
+                fy = fy + row.h + 8
             end
             y = y + ph + 16
         end
