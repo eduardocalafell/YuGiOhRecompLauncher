@@ -4,9 +4,11 @@ function love.conf(t)
     t.console = false -- love.exe stays windowed/silent; use lovec.exe for a debug console
 
     t.window.title = "ygo-recomp Launcher"
-    t.window.width = 1000
-    t.window.height = 720
-    t.window.resizable = false
+    t.window.width = 1120
+    t.window.height = 860
+    t.window.minwidth = 1000
+    t.window.minheight = 740
+    t.window.resizable = true
     t.window.vsync = 1
 
     t.modules.joystick = false

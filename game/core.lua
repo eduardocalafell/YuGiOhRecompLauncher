@@ -79,6 +79,7 @@ do
         void*    __stdcall FindFirstFileA(const char* lpFileName, WIN32_FIND_DATAA* lpFindFileData);
         int      __stdcall FindNextFileA(void* hFindFile, WIN32_FIND_DATAA* lpFindFileData);
         int      __stdcall FindClose(void* hFindFile);
+        int      __stdcall SetEnvironmentVariableA(const char* lpName, const char* lpValue);
 
         void* __stdcall ShellExecuteA(void* hwnd, const char* lpOperation,
             const char* lpFile, const char* lpParameters,
@@ -311,7 +312,13 @@ end
 -- core.ROOT's trailing backslash -- which is what surfaced to the user as "a
 -- bunch of DLL errors" instead of the game window. A direct ShellExecuteA
 -- call has no command line to mis-quote at all.
-function core.launch_game()
+-- opts.interpolation (bool) + opts.interp_fps: turn on the GL renderer's frame
+-- interpolation for the launched game by exporting PSX_FRAME_INTERPOLATION*
+-- into THIS process's environment first -- ShellExecuteA's child inherits it.
+-- (Env, not game.toml, so we never risk mis-editing the game's config parser;
+-- interpolation is a GL-only feature, so the caller also selects opengl.)
+function core.launch_game(opts)
+    opts = opts or {}
     if not core.exe_exists() then
         return false, "game executable not found: " .. core.EXE_PATH
     end
@@ -320,6 +327,14 @@ function core.launch_game()
     end
     if not win.shell32 then
         return false, "cannot launch: Win32 ShellExecute unavailable (FFI failed to load shell32)"
+    end
+    if win.k then
+        if opts.interpolation then
+            win.k.SetEnvironmentVariableA("PSX_FRAME_INTERPOLATION", "1")
+            win.k.SetEnvironmentVariableA("PSX_FRAME_INTERPOLATION_FPS", tostring(opts.interp_fps or 60))
+        else
+            win.k.SetEnvironmentVariableA("PSX_FRAME_INTERPOLATION", "0")
+        end
     end
     local rootClean = core.ROOT:gsub("[\\/]+$", "")
     local params = '--game "' .. core.TOML_PATH .. '"'
@@ -332,6 +347,15 @@ function core.launch_game()
         return true, "game launched (ShellExecute ok)"
     end
     return false, "ShellExecute failed (SE_ERR code " .. tostring(code) .. ")"
+end
+
+-- Opens saves\ in Explorer (best-effort). Same in-process FFI path as
+-- launch_game: no console flash, returns immediately.
+function core.open_saves_folder()
+    if not win.shell32 then return false end
+    local clean = core.SAVES_DIR:gsub("[\\/]+$", "")
+    win.shell32.ShellExecuteA(nil, "open", clean, nil, nil, 1)
+    return true
 end
 
 return core

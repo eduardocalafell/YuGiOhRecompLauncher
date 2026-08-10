@@ -2,11 +2,12 @@
 
 A small LÖVE2D (Lua) launcher/front-end for [YuGiOhForbiddenMemoriesRecomp](https://github.com/eduardocalafell/YuGiOhForbiddenMemoriesRecomp) — a static recompilation of *Yu-Gi-Oh! Forbidden Memories* (PS1, SLUS-01411) built on the [psxrecomp](https://github.com/mstan/psxrecomp) framework.
 
-This is a convenience shell around the already-built recompiled game. It does not touch the game's code or the recompiled binary itself — it only edits config and launches the process.
+This is a convenience shell around the already-built recompiled game. It does not touch the game's code or the recompiled binary itself — it only edits config and launches the process. The UI is a fully procedural "arcane gold / obsidian" theme (drawn in LÖVE, no external art beyond the project logo) — see `game/theme.lua` and `game/icons.lua`.
 
 ## What it does
 
 - **Renderer picker** — switches `[video] renderer` (`software` / `opengl` / `vulkan`) in the game's `game.toml` with a single-line, byte-preserving edit.
+- **Smooth 60 FPS mode** — one toggle selects OpenGL and enables the runtime's frame interpolation at launch (interpolated presentation up to the host refresh; guest timing stays stock), for smooth motion even though the game logic ticks below 60. Applied via `PSX_FRAME_INTERPOLATION*` env vars on the launched process — no `game.toml` edit.
 - **First-run disc setup wizard** — if no `disc/YUGIOH.cue` exists yet, prompts for the path to your own legally-dumped disc image and writes a minimal `.cue` pointing at it. Never copies the disc image itself.
 - **Save management** — lists memory card saves and makes one-click timestamped backups.
 - **Play** — launches the recompiled game as a detached process with the right working directory/config.

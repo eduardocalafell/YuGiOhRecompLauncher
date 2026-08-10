@@ -5,6 +5,7 @@ runtime/
 # Build artifacts — published as GitHub Release assets instead, not committed.
 dist/
 game.love
+*.zip
 
 # Diagnostic log written at runtime (see main.lua's dlog()).
 launcher-debug.log
