@@ -43,6 +43,11 @@ local function dlog(fmt, ...)
     debugLogFile:flush()
 end
 
+-- LÖVE runs on LuaJIT (Lua 5.1 semantics): the varargs-unpack function is
+-- the global `unpack`, not `table.unpack` (that's a 5.2+ addition and is
+-- simply absent here -- calling it throws "attempt to call a nil value").
+local unpack = table.unpack or unpack
+
 -- Wraps fn, always logs how long it took (ms) under `label`, always returns
 -- fn's own results untouched.
 local function timed(label, fn)
@@ -50,7 +55,7 @@ local function timed(label, fn)
         local t0 = love.timer.getTime()
         local results = { fn(...) }
         dlog("%-24s %7.1fms", label, (love.timer.getTime() - t0) * 1000)
-        return table.unpack(results)
+        return unpack(results)
     end
 end
 
