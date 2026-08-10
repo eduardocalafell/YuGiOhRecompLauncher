@@ -6,6 +6,9 @@ runtime/
 dist/
 game.love
 
+# Diagnostic log written at runtime (see main.lua's dlog()).
+launcher-debug.log
+
 # Editor/OS cruft.
 .vs/
 .vscode/

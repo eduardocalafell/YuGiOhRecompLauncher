@@ -29,6 +29,31 @@ local COLORS = {
 
 local FONT_TITLE, FONT_SUB, FONT_NORMAL, FONT_SMALL
 
+-- ------------------------------------------------------------- debug log
+-- Always-on diagnostic log to a plain file next to wherever the exe/love
+-- process's cwd is, so "runs fine for a few seconds then lags" can be
+-- diagnosed from a file afterward even when launched via double-click
+-- (no console attached). Overwritten fresh each run (mode "w").
+local DEBUG_LOG_PATH = "launcher-debug.log"
+local debugLogFile = io.open(DEBUG_LOG_PATH, "w")
+
+local function dlog(fmt, ...)
+    if not debugLogFile then return end
+    debugLogFile:write(string.format("[%9.3f] " .. fmt, love.timer.getTime(), ...) .. "\n")
+    debugLogFile:flush()
+end
+
+-- Wraps fn, always logs how long it took (ms) under `label`, always returns
+-- fn's own results untouched.
+local function timed(label, fn)
+    return function(...)
+        local t0 = love.timer.getTime()
+        local results = { fn(...) }
+        dlog("%-24s %7.1fms", label, (love.timer.getTime() - t0) * 1000)
+        return table.unpack(results)
+    end
+end
+
 -- persistent widget state (must survive across frames)
 local DiscField = { value = "", focused = false }
 local ShowDiscWizard = false
@@ -129,13 +154,46 @@ end
 
 -- ------------------------------------------------------------------ state
 
-local function refreshSaves()
-    Saves = core.list_saves()
+-- core.list_saves() shells out (cmd /c dir), which can take anywhere from a
+-- few ms to several seconds depending on what else is loading the machine
+-- (measured 5.7s once with the recompiled game itself busy in the
+-- background) -- and running that on the main thread would freeze the
+-- window for however long it takes. SavesWorker runs it on a background
+-- LÖVE thread instead: requestSavesRefresh() just posts a request and
+-- returns immediately; pollSavesRefresh(), called every love.update(), picks
+-- up the result whenever it's ready without ever blocking.
+local SavesWorker = love.thread.newThread("saves_worker.lua")
+local SavesRequestChannel = love.thread.getChannel("saves_refresh_request")
+local SavesResultChannel = love.thread.getChannel("saves_refresh_result")
+local SavesRefreshInFlight = false
+local SavesRefreshStartedAt = 0
+
+local function requestSavesRefresh()
+    if SavesRefreshInFlight then return end
+    SavesRefreshInFlight = true
+    SavesRefreshStartedAt = love.timer.getTime()
+    SavesRequestChannel:push(true)
 end
 
-local function refreshDiscSourcePath()
-    DiscSourcePath = core.read_cue_source_path()
+local function pollSavesRefresh()
+    local result = SavesResultChannel:pop()
+    if result then
+        Saves = result
+        SavesRefreshInFlight = false
+        dlog("refreshSaves (threaded)   %7.1fms", (love.timer.getTime() - SavesRefreshStartedAt) * 1000)
+    end
 end
+
+-- Same name used everywhere a refresh is wanted (initial load, post-backup,
+-- the periodic timer) -- always just posts the request, never blocks. The
+-- very first frame or two after love.load() will show an empty save list
+-- until the worker's first result comes back; deliberate trade for a UI
+-- thread that never stalls.
+local refreshSaves = requestSavesRefresh
+
+local refreshDiscSourcePath = timed("refreshDiscSourcePath", function()
+    DiscSourcePath = core.read_cue_source_path()
+end)
 
 local function refreshState()
     local r, err = core.get_renderer()
@@ -234,6 +292,16 @@ local function onPlay()
     end
 end
 
+-- Wrap the click handlers that can shell out / touch disk so their duration
+-- always lands in the debug log too (Lua closures capture these locals by
+-- reference, so reassigning here still reaches every button action already
+-- wired to them in love.draw()).
+onSelectRenderer = timed("onSelectRenderer", onSelectRenderer)
+onBrowseDisc = timed("onBrowseDisc", onBrowseDisc)
+onCreateCue = timed("onCreateCue", onCreateCue)
+onBackupSaves = timed("onBackupSaves", onBackupSaves)
+onPlay = timed("onPlay", onPlay)
+
 -- --------------------------------------------------------------- love.*
 
 function love.load(argv)
@@ -252,16 +320,59 @@ function love.load(argv)
         end
     end
 
+    local major, minor, revision, codename = love.getVersion()
+    dlog("launcher started -- LOVE %d.%d.%d (%s), OS=%s", major, minor, revision, codename, love.system.getOS())
+    SavesWorker:start()
     log("ygo-recomp launcher ready.")
     refreshState()
 end
 
+-- Periodic fps/frame-time/memory snapshot, always logged (not just on
+-- trouble) so a slow-onset pattern like "fine for a few seconds, then
+-- starts to lag" shows up as a visible trend in launcher-debug.log rather
+-- than needing to be caught live. SLOW FRAME lines flag individual frames
+-- worse than 20fps (dt > 50ms) as they happen, with whatever was hot in the
+-- previous ~1s of snapshots giving context for what was running at the time.
+local SnapshotTimer = 0
+local SNAPSHOT_INTERVAL = 1.0
+
 function love.update(dt)
+    pollSavesRefresh()
+
+    if SavesWorker then
+        local workerErr = SavesWorker:getError()
+        if workerErr then
+            dlog("SavesWorker thread error: %s", tostring(workerErr))
+            log("ERROR: save-list background thread died -- " .. tostring(workerErr))
+            SavesWorker = nil -- stop checking; avoid spamming the log every frame
+        end
+    end
+
     SaveRefreshTimer = SaveRefreshTimer + dt
     if SaveRefreshTimer >= SAVE_REFRESH_INTERVAL then
         SaveRefreshTimer = 0
         refreshSaves()
     end
+
+    if dt > 0.05 then
+        dlog("SLOW FRAME dt=%.1fms (%.1f fps-equivalent)", dt * 1000, 1 / dt)
+    end
+
+    SnapshotTimer = SnapshotTimer + dt
+    if SnapshotTimer >= SNAPSHOT_INTERVAL then
+        SnapshotTimer = 0
+        dlog("snapshot fps=%d dt=%.1fms lua_mem=%.1fKB buttons=%d fields=%d",
+            love.timer.getFPS(), dt * 1000, collectgarbage("count"),
+            #UI.buttons, #UI.fields)
+    end
+end
+
+function love.focus(focused)
+    dlog("window focus -> %s", tostring(focused))
+end
+
+function love.quit()
+    dlog("launcher quitting")
 end
 
 function love.mousepressed(x, y, mbutton)
@@ -380,11 +491,10 @@ function love.draw()
         love.graphics.setColor(COLORS.textDim)
         love.graphics.print("(no save files found)", 40, y + 10)
     else
-        for i, name in ipairs(saves) do
-            local size = core.file_size(core.SAVES_DIR .. name)
-            local sizeStr = size and string.format("%.1f KB", size / 1024) or "?"
+        for i, entry in ipairs(saves) do
+            local sizeStr = entry.size and string.format("%.1f KB", entry.size / 1024) or "?"
             love.graphics.setColor(COLORS.text)
-            love.graphics.print(name, 40, y + 10 + (i - 1) * 22)
+            love.graphics.print(entry.name, 40, y + 10 + (i - 1) * 22)
             love.graphics.setColor(COLORS.textDim)
             love.graphics.print(sizeStr, 300, y + 10 + (i - 1) * 22)
         end
