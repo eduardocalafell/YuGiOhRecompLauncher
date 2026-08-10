@@ -35,6 +35,18 @@ local ShowDiscWizard = false
 local CurrentRenderer = nil
 local Log = {}
 
+-- Cached filesystem reads. core.list_saves()/read_cue_source_path() shell
+-- out (dir/cmd), so calling them from love.draw() (60x/sec) was spawning a
+-- new process every frame -- the actual cause of sluggish UI response.
+-- Refreshed on load, right after any action that could change them, and
+-- otherwise on a slow timer (SAVE_REFRESH_INTERVAL) so an external change
+-- (e.g. a save made by the game itself while the launcher stays open) still
+-- shows up without re-shelling out every frame.
+local Saves = {}
+local DiscSourcePath = nil
+local SaveRefreshTimer = 0
+local SAVE_REFRESH_INTERVAL = 2.0
+
 -- per-frame widget registries, rebuilt every love.draw()
 local UI = { buttons = {}, fields = {} }
 
@@ -117,6 +129,14 @@ end
 
 -- ------------------------------------------------------------------ state
 
+local function refreshSaves()
+    Saves = core.list_saves()
+end
+
+local function refreshDiscSourcePath()
+    DiscSourcePath = core.read_cue_source_path()
+end
+
 local function refreshState()
     local r, err = core.get_renderer()
     CurrentRenderer = r
@@ -125,6 +145,8 @@ local function refreshState()
     if not core.exe_exists() then
         log("WARNING: game exe not found at " .. core.EXE_PATH)
     end
+    refreshSaves()
+    refreshDiscSourcePath()
 end
 
 -- ------------------------------------------------------------- callbacks
@@ -177,6 +199,7 @@ local function onCreateCue()
     if ok then
         log("Created disc\\YUGIOH.cue -> " .. path)
         ShowDiscWizard = false
+        refreshDiscSourcePath()
     else
         log("ERROR creating .cue: " .. tostring(err))
     end
@@ -193,6 +216,7 @@ end
 
 local function onBackupSaves()
     local backedUp, errors = core.backup_saves()
+    refreshSaves()
     for _, e in ipairs(errors) do log("backup error -- " .. e) end
     if #backedUp > 0 then
         log("Backed up " .. #backedUp .. " file(s) to saves\\backups\\")
@@ -230,6 +254,14 @@ function love.load(argv)
 
     log("ygo-recomp launcher ready.")
     refreshState()
+end
+
+function love.update(dt)
+    SaveRefreshTimer = SaveRefreshTimer + dt
+    if SaveRefreshTimer >= SAVE_REFRESH_INTERVAL then
+        SaveRefreshTimer = 0
+        refreshSaves()
+    end
 end
 
 function love.mousepressed(x, y, mbutton)
@@ -329,7 +361,7 @@ function love.draw()
         love.graphics.print("Configured:", 60, y + 14)
         love.graphics.setFont(FONT_SMALL)
         love.graphics.setColor(COLORS.textDim)
-        love.graphics.print(core.read_cue_source_path() or core.CUE_PATH, 60, y + 36)
+        love.graphics.print(DiscSourcePath or core.CUE_PATH, 60, y + 36)
         love.graphics.setFont(FONT_NORMAL)
         button(800, y + 16, 156, 34, "Change disc image...", { action = onReconfigureDisc })
     end
@@ -340,7 +372,7 @@ function love.draw()
     y = y + 28
 
     love.graphics.setColor(COLORS.panel)
-    local saves = core.list_saves()
+    local saves = Saves
     local listH = math.max(1, #saves) * 22 + 16
     love.graphics.rectangle("fill", 28, y, 944, listH, 6, 6)
     love.graphics.setFont(FONT_SMALL)
