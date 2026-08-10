@@ -47,10 +47,9 @@ C:\games\
 
 ## Known simplifications (candidates for a future pass)
 
-- The native file-picker dialog blocks the UI thread while open (should move to `love.thread`).
+- The first-run Browse… file-picker still shells out to a one-shot PowerShell `OpenFileDialog` and blocks the UI thread while open. It's the last remaining subprocess in the launcher (everything else — directory listing, mkdir, launching the game — now goes straight through the Win32 API via LuaJIT's FFI, so nothing flashes a console during normal use). Low priority since it only fires once, during disc setup.
 - No validation of the chosen disc dump's contents (track count/sector mode) beyond "the file exists".
 - No launcher-side settings persistence beyond what's already in `game.toml`.
-- Directory listing shells out to `cmd` rather than using a filesystem library.
 
 ## Legal
 

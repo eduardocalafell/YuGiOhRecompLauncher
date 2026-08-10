@@ -159,14 +159,13 @@ end
 
 -- ------------------------------------------------------------------ state
 
--- core.list_saves() shells out (cmd /c dir), which can take anywhere from a
--- few ms to several seconds depending on what else is loading the machine
--- (measured 5.7s once with the recompiled game itself busy in the
--- background) -- and running that on the main thread would freeze the
--- window for however long it takes. SavesWorker runs it on a background
--- LÖVE thread instead: requestSavesRefresh() just posts a request and
--- returns immediately; pollSavesRefresh(), called every love.update(), picks
--- up the result whenever it's ready without ever blocking.
+-- core.list_saves() now enumerates saves\ in-process via the Win32 FFI
+-- (FindFirstFile) rather than shelling out, so it's microseconds and never
+-- flashes a console. SavesWorker keeps the enumeration off the main thread
+-- anyway (cheap insurance against a pathologically large/network saves\
+-- folder): requestSavesRefresh() just posts a request and returns
+-- immediately; pollSavesRefresh(), called every love.update(), picks up the
+-- result whenever it's ready without ever blocking.
 local SavesWorker = love.thread.newThread("saves_worker.lua")
 local SavesRequestChannel = love.thread.getChannel("saves_refresh_request")
 local SavesResultChannel = love.thread.getChannel("saves_refresh_result")

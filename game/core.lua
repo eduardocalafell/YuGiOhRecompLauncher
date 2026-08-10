@@ -40,37 +40,80 @@ function core.file_size(path)
     return size
 end
 
--- Every shell-out below goes through hidden PowerShell (-WindowStyle Hidden)
--- rather than `cmd /c ...`: love.exe/lovec.exe have no console of their own
--- (see conf.lua's t.console = false), so a plain cmd.exe child briefly flashes
--- a visible console window every time -- very noticeable for list_saves(),
--- which a background thread calls every ~2s (see main.lua's SavesWorker).
--- PowerShell single-quoted strings don't need backslash-escaping, so Windows
--- paths pass through as-is; embedded single quotes (unlikely in these
--- controlled paths, but cheap to handle) are escaped by doubling.
-local function ps_quote(s)
-    return "'" .. s:gsub("'", "''") .. "'"
+-- Filesystem/process helpers below call the Win32 API directly through
+-- LuaJIT's FFI instead of shelling out to cmd/PowerShell. This is THE fix for
+-- the "launcher won't open, there's just a cmd flashing" report: love.exe has
+-- no console of its own (conf.lua's t.console = false), and under that
+-- condition `-WindowStyle Hidden` does NOT stop Windows from briefly creating
+-- (and flashing, and focus-stealing) a conhost window for every child
+-- process. list_saves() runs every ~2s (main.lua's SavesWorker), so a console
+-- popped twice a second -- masking the real launcher window. FFI calls run
+-- in-process: no child, no console, no flash, and microseconds instead of a
+-- ~40ms+ process spawn. ANSI ("A") entry points are used deliberately: every
+-- path this module touches is plain ASCII (C:\games\...), so there is no
+-- UTF-16 marshaling to get wrong. The __stdcall annotations are no-ops on the
+-- x64 build (single calling convention) but keep this correct if ever run on
+-- a 32-bit LÖVE.
+local ffi = require("ffi")
+local bit = require("bit")
+
+local win = {}
+do
+    local okdef = pcall(ffi.cdef, [[
+        typedef struct _FILETIME { uint32_t dwLowDateTime; uint32_t dwHighDateTime; } FILETIME;
+        typedef struct _WIN32_FIND_DATAA {
+            uint32_t dwFileAttributes;
+            FILETIME ftCreationTime;
+            FILETIME ftLastAccessTime;
+            FILETIME ftLastWriteTime;
+            uint32_t nFileSizeHigh;
+            uint32_t nFileSizeLow;
+            uint32_t dwReserved0;
+            uint32_t dwReserved1;
+            char     cFileName[260];
+            char     cAlternateFileName[14];
+        } WIN32_FIND_DATAA;
+
+        uint32_t __stdcall GetFileAttributesA(const char* lpFileName);
+        int      __stdcall CreateDirectoryA(const char* lpPathName, void* lpSecurityAttributes);
+        void*    __stdcall FindFirstFileA(const char* lpFileName, WIN32_FIND_DATAA* lpFindFileData);
+        int      __stdcall FindNextFileA(void* hFindFile, WIN32_FIND_DATAA* lpFindFileData);
+        int      __stdcall FindClose(void* hFindFile);
+
+        void* __stdcall ShellExecuteA(void* hwnd, const char* lpOperation,
+            const char* lpFile, const char* lpParameters,
+            const char* lpDirectory, int nShowCmd);
+    ]])
+    if okdef then
+        local okk, kernel32 = pcall(ffi.load, "kernel32")
+        local oks, shell32  = pcall(ffi.load, "shell32")
+        win.k = okk and kernel32 or ffi.C   -- kernel32 exports also resolve via ffi.C
+        win.shell32 = oks and shell32 or nil
+    end
 end
 
-local function run_hidden_ps(script, mode)
-    return io.popen('powershell -NoProfile -WindowStyle Hidden -Command "' .. script .. '"', mode)
-end
+local INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF
+local FILE_ATTRIBUTE_DIRECTORY = 0x10
+local INVALID_HANDLE_VALUE = ffi.cast("void*", -1)
 
 function core.dir_exists(path)
+    if not win.k then return false end
     local clean = path:gsub("[\\/]+$", "")
-    local p = run_hidden_ps("if (Test-Path -LiteralPath " .. ps_quote(clean) ..
-        " -PathType Container) { 'YES' } else { 'NO' }")
-    if not p then return false end
-    local out = p:read("*l")
-    p:close()
-    return out == "YES"
+    local attr = win.k.GetFileAttributesA(clean)
+    if attr == INVALID_FILE_ATTRIBUTES then return false end
+    return bit.band(attr, FILE_ATTRIBUTE_DIRECTORY) ~= 0
 end
 
+-- CreateDirectoryA only makes a single level, so walk up and create any
+-- missing parents first. Stops at a drive root ("C:") or the empty string.
 function core.ensure_dir(path)
+    if not win.k then return false end
     local clean = path:gsub("[\\/]+$", "")
+    if clean == "" or clean:match("^%a:$") then return true end
     if core.dir_exists(clean) then return true end
-    local p = run_hidden_ps("New-Item -ItemType Directory -Force -Path " .. ps_quote(clean) .. " | Out-Null")
-    if p then p:close() end
+    local parent = clean:match("^(.*)[\\/][^\\/]+$")
+    if parent and parent ~= clean then core.ensure_dir(parent) end
+    win.k.CreateDirectoryA(clean, nil)
     return core.dir_exists(clean)
 end
 
@@ -199,14 +242,18 @@ end
 -- memory card images, excluding the backups\ subfolder itself.
 function core.list_saves()
     local results = {}
+    if not win.k then return results end
     local clean = core.SAVES_DIR:gsub("[\\/]+$", "")
-    local p = run_hidden_ps("Get-ChildItem -LiteralPath " .. ps_quote(clean) ..
-        " -File -ErrorAction SilentlyContinue | ForEach-Object Name")
-    if not p then return results end
-    for name in p:lines() do
-        if name ~= "" then table.insert(results, name) end
-    end
-    p:close()
+    local fd = ffi.new("WIN32_FIND_DATAA")
+    local h = win.k.FindFirstFileA(clean .. "\\*", fd)
+    if h == INVALID_HANDLE_VALUE then return results end
+    repeat
+        if bit.band(fd.dwFileAttributes, FILE_ATTRIBUTE_DIRECTORY) == 0 then
+            local name = ffi.string(fd.cFileName)
+            if name ~= "" then results[#results + 1] = name end
+        end
+    until win.k.FindNextFileA(h, fd) == 0
+    win.k.FindClose(h)
     return results
 end
 
@@ -249,24 +296,21 @@ function core.exe_exists()
     return core.file_exists(core.EXE_PATH)
 end
 
--- Launches the recompiled game as a detached subprocess, matching the
--- README's documented invocation (`--game game.toml`, run with the project
--- root as the working directory), via PowerShell's Start-Process -- which
--- both sets the child's working directory and returns immediately instead
--- of blocking this launcher's UI thread until the game exits. Wrapped in a
--- hidden PowerShell host the same way as the other shell-outs in this file
--- (see run_hidden_ps above) so only the launcher's own invocation is
--- invisible; Start-Process itself does NOT hide the child, so the game's
--- own window still opens normally.
+-- Launches the recompiled game exactly the way double-clicking it in Explorer
+-- would: ShellExecuteA with the "open" verb. It returns immediately (never
+-- blocks this launcher's UI thread), creates no console of its own, and --
+-- crucially -- takes an explicit working directory. game.toml references the
+-- exe and disc with paths relative to the project root (exe = "ygo/...",
+-- disc = "disc/..."), so the child MUST run with core.ROOT as its cwd, which
+-- lpDirectory sets. The --game argument is passed as an absolute path so the
+-- .toml itself is found regardless of cwd.
 --
--- core.ROOT ends in a trailing backslash (by design, so ROOT .. "x.toml"
--- reads cleanly) -- but a trailing backslash immediately before a closing
--- quote is a classic Windows command-line footgun (cmd/CRT argv parsing
--- treats \" as an escaped literal quote, not "backslash then close-quote",
--- silently corrupting everything after it). Previously this used `start`
--- with core.ROOT quoted as-is and it broke exactly that way -- launching a
--- garbled command that manifested as DLL-not-found dialogs instead of the
--- game. Stripped here before quoting, same as every other path in this file.
+-- This replaces an earlier PowerShell `Start-Process` shell-out. That version
+-- flashed a console (love.exe has no console, so even a hidden PS host popped
+-- a conhost window) and had a history of argv-quoting corruption around
+-- core.ROOT's trailing backslash -- which is what surfaced to the user as "a
+-- bunch of DLL errors" instead of the game window. A direct ShellExecuteA
+-- call has no command line to mis-quote at all.
 function core.launch_game()
     if not core.exe_exists() then
         return false, "game executable not found: " .. core.EXE_PATH
@@ -274,15 +318,20 @@ function core.launch_game()
     if not core.cue_exists() then
         return false, "disc\\YUGIOH.cue not found yet -- finish the disc setup step first"
     end
+    if not win.shell32 then
+        return false, "cannot launch: Win32 ShellExecute unavailable (FFI failed to load shell32)"
+    end
     local rootClean = core.ROOT:gsub("[\\/]+$", "")
-    local script = string.format(
-        "Start-Process -FilePath %s -ArgumentList '--game',%s -WorkingDirectory %s",
-        ps_quote(core.EXE_PATH), ps_quote(core.TOML_PATH), ps_quote(rootClean))
-    local p = run_hidden_ps(script)
-    if not p then return false, "could not launch (io.popen failed)" end
-    local ok, exitReason, code = p:close()
-    return true, string.format("launch command issued (ok=%s, %s, code=%s)",
-        tostring(ok), tostring(exitReason), tostring(code))
+    local params = '--game "' .. core.TOML_PATH .. '"'
+    local SW_SHOWNORMAL = 1
+    local hinst = win.shell32.ShellExecuteA(nil, "open", core.EXE_PATH, params, rootClean, SW_SHOWNORMAL)
+    -- ShellExecuteA returns a pseudo-HINSTANCE; > 32 means success, <= 32 is
+    -- an SE_ERR_* code (2 = file not found, 8 = out of memory, 31 = no assoc).
+    local code = tonumber(ffi.cast("intptr_t", hinst))
+    if code > 32 then
+        return true, "game launched (ShellExecute ok)"
+    end
+    return false, "ShellExecute failed (SE_ERR code " .. tostring(code) .. ")"
 end
 
 return core
