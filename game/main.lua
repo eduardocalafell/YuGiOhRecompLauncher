@@ -326,6 +326,21 @@ function love.load(argv)
 
     local major, minor, revision, codename = love.getVersion()
     dlog("launcher started -- LOVE %d.%d.%d (%s), OS=%s", major, minor, revision, codename, love.system.getOS())
+
+    -- One-shot environment snapshot: if the window renders black, these lines
+    -- say whether the GL context is a real GPU or a broken/software fallback.
+    local ok_ri, rname, rver, rvendor, rdevice = pcall(love.graphics.getRendererInfo)
+    if ok_ri then
+        dlog("renderer: name=%s ver=%s vendor=%s device=%s", tostring(rname), tostring(rver), tostring(rvendor), tostring(rdevice))
+    else
+        dlog("renderer: getRendererInfo FAILED (%s)", tostring(rname))
+    end
+    local w, h, flags = love.window.getMode()
+    dlog("window: %dx%d fs=%s vsync=%s display=%s dpiscale=%.2f active=%s",
+        w, h, tostring(flags.fullscreen), tostring(flags.vsync), tostring(flags.display),
+        love.window.getDPIScale(), tostring(love.graphics.isActive()))
+    dlog("save dir: %s", love.filesystem.getSaveDirectory())
+    dlog("argv: [%s]", table.concat(argv or {}, "] ["))
     SavesWorker:start()
     log("ygo-recomp launcher ready.")
     refreshState()
