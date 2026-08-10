@@ -1,0 +1,13 @@
+# LÖVE runtime distribution — redistributable (zlib license) but large;
+# fetched fresh from love2d.org rather than vendored in git history.
+runtime/
+
+# Build artifacts — published as GitHub Release assets instead, not committed.
+dist/
+game.love
+
+# Editor/OS cruft.
+.vs/
+.vscode/
+*.user
+Thumbs.db
