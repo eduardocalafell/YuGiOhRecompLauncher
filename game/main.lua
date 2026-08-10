@@ -45,6 +45,8 @@ local SaveRefreshTimer = 0
 local SAVE_REFRESH_INTERVAL = 2.0
 local Ripples = {}             -- click feedback rings
 local SmoothMode = false       -- "Smooth 60 FPS": opengl + GL frame interpolation
+local ActiveTab = "launcher"   -- "launcher" | "mods"
+local ModsList = {}            -- cached core.list_mods()
 
 -- per-frame widget registries
 local UI = { buttons = {}, fields = {} }
@@ -205,6 +207,29 @@ local function onToggleSmooth()
     end
     log(SmoothMode and "Smooth 60 FPS ON — opengl + frame interpolation"
         or "Smooth 60 FPS OFF", SmoothMode and "success" or "info")
+end
+
+-- ---- mods
+local function refreshMods()
+    ModsList = core.list_mods()
+end
+
+local function onSwitchTab(id)
+    ActiveTab = id
+    if id == "mods" then refreshMods() end
+end
+
+-- Feature toggles are pre-boot exe patches, so a change takes effect the next
+-- time the game is launched (not live).
+local function onToggleModFeature(pkgId, featId, enabled)
+    local ok, err = core.set_mod_feature_enabled(pkgId, featId, enabled)
+    if ok then
+        log((enabled and "Enabled" or "Disabled") .. " '" .. tostring(featId) ..
+            "' — applies on next launch", enabled and "success" or "info")
+    else
+        log("mod toggle failed: " .. tostring(err), "error")
+    end
+    refreshMods()
 end
 
 onSelectRenderer = timed("onSelectRenderer", onSelectRenderer)
@@ -380,6 +405,7 @@ function love.load(argv)
     SavesWorker:start()
     log("ygo-recomp launcher ready.", "success")
     refreshState()
+    refreshMods()
 end
 
 -- ----------------------------------------------------------- love.update
@@ -488,6 +514,19 @@ function love.draw()
     love.graphics.setColor(C.textMuted)
     printTracked("YGO-RECOMP LAUNCHER", P + 32, 24, 2, FONT_SMALL)
 
+    -- tab selector (top-right): LAUNCHER | MODS
+    do
+        local tabs = { { id = "launcher", label = "LAUNCHER" }, { id = "mods", label = "MODS" } }
+        local tw = 116
+        local txx = W - P - (#tabs * tw) - ((#tabs - 1) * 8)
+        for _, tb in ipairs(tabs) do
+            button({ x = txx, y = 14, w = tw, h = 30, label = tb.label, variant = "renderer",
+                active = (ActiveTab == tb.id), font = FONT_SMALL, center = true,
+                action = function() onSwitchTab(tb.id) end })
+            txx = txx + tw + 8
+        end
+    end
+
     local headerY = 62
     local footerH = 40
     local artW = 250
@@ -532,6 +571,7 @@ function love.draw()
 
     local y = headerY + 146
 
+  if ActiveTab == "launcher" then
     -- ---- renderer
     sectionLabel("Renderer", colX, y)
     y = y + 26
@@ -677,6 +717,53 @@ function love.draw()
         love.graphics.setColor(C.text)
         love.graphics.print(entry.msg, colX + 118, ly)
     end
+
+  else
+    -- ---- mods view
+    sectionLabel("Mods", colX, y)
+    love.graphics.setFont(FONT_TINY)
+    love.graphics.setColor(C.textMuted)
+    love.graphics.print(#ModsList .. " package(s) — toggles apply on next launch", colX + 66, y + 3)
+    y = y + 30
+    if #ModsList == 0 then
+        Theme.panel(colX, y, colW, 90)
+        love.graphics.setFont(FONT_SMALL)
+        love.graphics.setColor(C.textMuted)
+        love.graphics.printf("No .psxmod packages installed.\nInstall into  " .. core.MODS_PKG_DIR .. "\\<id>\\<version>\\manifest.toml",
+            colX + 20, y + 30, colW - 40, "center")
+    else
+        for _, pkg in ipairs(ModsList) do
+            local ph = 46 + #pkg.features * 56
+            Theme.panel(colX, y, colW, ph)
+            love.graphics.setFont(FONT_BODY)
+            love.graphics.setColor(C.gold)
+            love.graphics.print(pkg.name, colX + 16, y + 12)
+            local nameW = FONT_BODY:getWidth(pkg.name)
+            love.graphics.setFont(FONT_TINY)
+            love.graphics.setColor(C.textMuted)
+            local meta = "v" .. tostring(pkg.version)
+            if pkg.author ~= "" then meta = meta .. "  ·  by " .. pkg.author end
+            love.graphics.print(meta, colX + 16 + nameW + 12, y + 16)
+            local fy = y + 42
+            for _, f in ipairs(pkg.features) do
+                Theme.fillRect(colX + 12, fy, colW - 24, 48, 6, C.obsidian, f.enabled and 0.55 or 0.35)
+                if f.enabled then
+                    Theme.strokeRect(colX + 12, fy, colW - 24, 48, 6, Theme.rgba(C.success, 0.4), 1, 1)
+                end
+                love.graphics.setFont(FONT_SMALL)
+                love.graphics.setColor(f.enabled and C.text or C.textMuted)
+                love.graphics.print(f.name, colX + 26, fy + 8)
+                love.graphics.setFont(FONT_TINY)
+                love.graphics.setColor(C.textMuted)
+                love.graphics.printf(f.description, colX + 26, fy + 27, colW - 150, "left")
+                local pid, fid, en = pkg.id, f.id, f.enabled
+                toggleSwitch(colX + colW - 74, fy + 12, en, function() onToggleModFeature(pid, fid, not en) end)
+                fy = fy + 56
+            end
+            y = y + ph + 16
+        end
+    end
+  end
 
     -- ---- footer
     love.graphics.setFont(FONT_TINY)

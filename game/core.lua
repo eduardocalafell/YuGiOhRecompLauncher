@@ -358,4 +358,142 @@ function core.open_saves_folder()
     return true
 end
 
+-- ------------------------------------------------------------------ mods
+-- The recompiled runtime loads .psxmod packages from <exe_dir>/mods
+-- (main.cpp: exe_dir_from_argv/"mods"): packages/<id>/<version>/manifest.toml
+-- describes features + guarded patches; state.toml (format 2) records which
+-- features are enabled. This launcher is the mod-manager front-end for them.
+core.MODS_DIR     = core.EXE_DIR .. "mods\\"
+core.MODS_PKG_DIR = core.MODS_DIR .. "packages"
+core.MODS_STATE   = core.MODS_DIR .. "state.toml"
+
+-- Lists immediate SUBDIRECTORIES of a path (FFI FindFirstFile, dirs only).
+function core.list_dirs(path)
+    local results = {}
+    if not win.k then return results end
+    local clean = path:gsub("[\\/]+$", "")
+    local fd = ffi.new("WIN32_FIND_DATAA")
+    local h = win.k.FindFirstFileA(clean .. "\\*", fd)
+    if h == INVALID_HANDLE_VALUE then return results end
+    repeat
+        if bit.band(fd.dwFileAttributes, FILE_ATTRIBUTE_DIRECTORY) ~= 0 then
+            local name = ffi.string(fd.cFileName)
+            if name ~= "" and name ~= "." and name ~= ".." then
+                results[#results + 1] = name
+            end
+        end
+    until win.k.FindNextFileA(h, fd) == 0
+    win.k.FindClose(h)
+    return results
+end
+
+-- Minimal TOML reader for exactly the manifests/state we produce: top-level
+-- `key = value` plus `[[array]]` array-of-tables. Enough for feature listing;
+-- NOT a general TOML parser (no inline tables, nested keys, or multiline).
+-- Returns { top = {k=v}, arrays = { name = { {k=v}, ... } } }.
+function core.parse_toml(text)
+    local top, arrays, cur = {}, {}, nil
+    top = {}
+    cur = top
+    for raw in (text .. "\n"):gmatch("(.-)\r?\n") do
+        local s = raw:gsub("^%s+", ""):gsub("%s+$", "")
+        if s ~= "" and not s:match("^#") then
+            local arr = s:match("^%[%[%s*([%w_%.]+)%s*%]%]$")
+            local tbl = s:match("^%[%s*([%w_%.]+)%s*%]$")
+            if arr then
+                arrays[arr] = arrays[arr] or {}
+                cur = {}
+                table.insert(arrays[arr], cur)
+            elseif tbl then
+                cur = {}          -- a [sub.table] we don't need; isolate it
+            else
+                local k, v = s:match("^([%w_]+)%s*=%s*(.+)$")
+                if k and cur then
+                    if v:match('^".*"$') then
+                        v = v:sub(2, -2)
+                    elseif v == "true" then v = true
+                    elseif v == "false" then v = false
+                    elseif v:match("^%-?%d+$") or v:match("^0[xX]%x+$") then
+                        v = tonumber(v)
+                    end
+                    cur[k] = v
+                end
+            end
+        end
+    end
+    return { top = top, arrays = arrays }
+end
+
+-- Returns the installed mod packages with per-feature enabled state:
+-- { { id, version, name, author, description,
+--     features = { { id, name, description, group, enabled }, ... } }, ... }
+function core.list_mods()
+    local mods = {}
+    if not core.dir_exists(core.MODS_PKG_DIR) then return mods end
+
+    -- state.toml -> enabled map keyed "pkgId\0featId"
+    local enabled = {}
+    local st = core.read_all(core.MODS_STATE)
+    if st then
+        local p = core.parse_toml(st)
+        for _, f in ipairs(p.arrays.feature or {}) do
+            if f.package_id and f.id then
+                enabled[f.package_id .. "\0" .. f.id] = (f.enabled == true)
+            end
+        end
+    end
+
+    for _, id in ipairs(core.list_dirs(core.MODS_PKG_DIR)) do
+        for _, ver in ipairs(core.list_dirs(core.MODS_PKG_DIR .. "\\" .. id)) do
+            local data = core.read_all(core.MODS_PKG_DIR .. "\\" .. id .. "\\" .. ver .. "\\manifest.toml")
+            if data then
+                local p = core.parse_toml(data)
+                local pkg = {
+                    id = p.top.id or id, version = p.top.version or ver,
+                    name = p.top.name or id, author = p.top.author or "",
+                    description = p.top.description or "", features = {},
+                }
+                for _, f in ipairs(p.arrays.feature or {}) do
+                    local en = enabled[pkg.id .. "\0" .. tostring(f.id)]
+                    if en == nil then en = (f.default_enabled == true) end
+                    table.insert(pkg.features, {
+                        id = f.id, name = f.name or f.id,
+                        description = f.description or "", group = f.group, enabled = en,
+                    })
+                end
+                table.insert(mods, pkg)
+            end
+        end
+    end
+    return mods
+end
+
+-- Flips one feature on/off by regenerating state.toml from the current mod set
+-- (small, fully-owned file -- simplest correct approach vs a surgical edit).
+function core.set_mod_feature_enabled(pkgId, featId, enabled)
+    local mods = core.list_mods()
+    local lines = { "format_version = 2", "" }
+    for _, pkg in ipairs(mods) do
+        lines[#lines + 1] = "[[package]]"
+        lines[#lines + 1] = 'id = "' .. pkg.id .. '"'
+        lines[#lines + 1] = 'version = "' .. pkg.version .. '"'
+        lines[#lines + 1] = ""
+    end
+    for _, pkg in ipairs(mods) do
+        for _, f in ipairs(pkg.features) do
+            local en = f.enabled
+            if pkg.id == pkgId and f.id == featId then en = enabled end
+            lines[#lines + 1] = "[[feature]]"
+            lines[#lines + 1] = 'package_id = "' .. pkg.id .. '"'
+            lines[#lines + 1] = 'id = "' .. tostring(f.id) .. '"'
+            lines[#lines + 1] = "enabled = " .. tostring(en)
+            lines[#lines + 1] = ""
+        end
+    end
+    if not core.ensure_dir(core.MODS_DIR) then
+        return false, "mods dir missing: " .. core.MODS_DIR
+    end
+    return core.write_all(core.MODS_STATE, table.concat(lines, "\n") .. "\n")
+end
+
 return core
