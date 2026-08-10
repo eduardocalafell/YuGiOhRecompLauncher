@@ -40,9 +40,26 @@ function core.file_size(path)
     return size
 end
 
+-- Every shell-out below goes through hidden PowerShell (-WindowStyle Hidden)
+-- rather than `cmd /c ...`: love.exe/lovec.exe have no console of their own
+-- (see conf.lua's t.console = false), so a plain cmd.exe child briefly flashes
+-- a visible console window every time -- very noticeable for list_saves(),
+-- which a background thread calls every ~2s (see main.lua's SavesWorker).
+-- PowerShell single-quoted strings don't need backslash-escaping, so Windows
+-- paths pass through as-is; embedded single quotes (unlikely in these
+-- controlled paths, but cheap to handle) are escaped by doubling.
+local function ps_quote(s)
+    return "'" .. s:gsub("'", "''") .. "'"
+end
+
+local function run_hidden_ps(script, mode)
+    return io.popen('powershell -NoProfile -WindowStyle Hidden -Command "' .. script .. '"', mode)
+end
+
 function core.dir_exists(path)
     local clean = path:gsub("[\\/]+$", "")
-    local p = io.popen('cmd /c if exist "' .. clean .. '\\*" (echo YES) else (echo NO)')
+    local p = run_hidden_ps("if (Test-Path -LiteralPath " .. ps_quote(clean) ..
+        " -PathType Container) { 'YES' } else { 'NO' }")
     if not p then return false end
     local out = p:read("*l")
     p:close()
@@ -52,7 +69,8 @@ end
 function core.ensure_dir(path)
     local clean = path:gsub("[\\/]+$", "")
     if core.dir_exists(clean) then return true end
-    os.execute('cmd /c mkdir "' .. clean .. '" >NUL 2>NUL')
+    local p = run_hidden_ps("New-Item -ItemType Directory -Force -Path " .. ps_quote(clean) .. " | Out-Null")
+    if p then p:close() end
     return core.dir_exists(clean)
 end
 
@@ -181,7 +199,9 @@ end
 -- memory card images, excluding the backups\ subfolder itself.
 function core.list_saves()
     local results = {}
-    local p = io.popen('dir /b /a:-d "' .. core.SAVES_DIR .. '" 2>NUL')
+    local clean = core.SAVES_DIR:gsub("[\\/]+$", "")
+    local p = run_hidden_ps("Get-ChildItem -LiteralPath " .. ps_quote(clean) ..
+        " -File -ErrorAction SilentlyContinue | ForEach-Object Name")
     if not p then return results end
     for name in p:lines() do
         if name ~= "" then table.insert(results, name) end
@@ -231,9 +251,22 @@ end
 
 -- Launches the recompiled game as a detached subprocess, matching the
 -- README's documented invocation (`--game game.toml`, run with the project
--- root as the working directory). `start "" /D <dir> "<exe>" args` both sets
--- the child's working directory and returns immediately instead of blocking
--- this launcher's UI thread until the game exits.
+-- root as the working directory), via PowerShell's Start-Process -- which
+-- both sets the child's working directory and returns immediately instead
+-- of blocking this launcher's UI thread until the game exits. Wrapped in a
+-- hidden PowerShell host the same way as the other shell-outs in this file
+-- (see run_hidden_ps above) so only the launcher's own invocation is
+-- invisible; Start-Process itself does NOT hide the child, so the game's
+-- own window still opens normally.
+--
+-- core.ROOT ends in a trailing backslash (by design, so ROOT .. "x.toml"
+-- reads cleanly) -- but a trailing backslash immediately before a closing
+-- quote is a classic Windows command-line footgun (cmd/CRT argv parsing
+-- treats \" as an escaped literal quote, not "backslash then close-quote",
+-- silently corrupting everything after it). Previously this used `start`
+-- with core.ROOT quoted as-is and it broke exactly that way -- launching a
+-- garbled command that manifested as DLL-not-found dialogs instead of the
+-- game. Stripped here before quoting, same as every other path in this file.
 function core.launch_game()
     if not core.exe_exists() then
         return false, "game executable not found: " .. core.EXE_PATH
@@ -241,11 +274,15 @@ function core.launch_game()
     if not core.cue_exists() then
         return false, "disc\\YUGIOH.cue not found yet -- finish the disc setup step first"
     end
-    local cmd = string.format(
-        'start "" /D "%s" "%s" --game "%s"',
-        core.ROOT, core.EXE_PATH, core.TOML_PATH)
-    local code = os.execute(cmd)
-    return true, "launch command issued (os.execute -> " .. tostring(code) .. ")"
+    local rootClean = core.ROOT:gsub("[\\/]+$", "")
+    local script = string.format(
+        "Start-Process -FilePath %s -ArgumentList '--game',%s -WorkingDirectory %s",
+        ps_quote(core.EXE_PATH), ps_quote(core.TOML_PATH), ps_quote(rootClean))
+    local p = run_hidden_ps(script)
+    if not p then return false, "could not launch (io.popen failed)" end
+    local ok, exitReason, code = p:close()
+    return true, string.format("launch command issued (ok=%s, %s, code=%s)",
+        tostring(ok), tostring(exitReason), tostring(code))
 end
 
 return core
